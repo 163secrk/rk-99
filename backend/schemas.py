@@ -89,6 +89,23 @@ class SQLExecuteResponse(BaseModel):
     execution_time_ms: int
 
 
+class SQLSingleResult(BaseModel):
+    sql: str
+    is_select: bool
+    columns: List[str] = []
+    rows: List[List[Any]] = []
+    total_rows: int = 0
+    affected_rows: int = 0
+    error: Optional[str] = None
+
+
+class SQLExecuteBatchResponse(BaseModel):
+    results: List[SQLSingleResult]
+    execution_time_ms: int
+    success_count: int
+    failed_count: int
+
+
 class TestConnectionRequest(BaseModel):
     name: str
     host: str

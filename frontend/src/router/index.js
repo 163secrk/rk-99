@@ -8,6 +8,7 @@ import Login from '@/views/Login.vue'
 import UserManagement from '@/views/UserManagement.vue'
 import MyLogs from '@/views/MyLogs.vue'
 import Dashboard from '@/views/Dashboard.vue'
+import WorkOrders from '@/views/WorkOrders.vue'
 
 const routes = [
   {
@@ -33,6 +34,12 @@ const routes = [
     name: 'my-logs',
     component: MyLogs,
     meta: { title: '我的记录', roles: ['dba', 'developer'] }
+  },
+  {
+    path: '/work-orders',
+    name: 'work-orders',
+    component: WorkOrders,
+    meta: { title: '变更工单', roles: ['dba', 'developer'] }
   },
   {
     path: '/datasources',

@@ -65,7 +65,8 @@ export const datasourceApi = {
 }
 
 export const queryApi = {
-  execute: (data) => api.post('/execute', data)
+  execute: (data) => api.post('/execute', data),
+  executeBatch: (data) => api.post('/execute-batch', data)
 }
 
 export const auditApi = {
@@ -89,6 +90,18 @@ export const maskingRuleApi = {
   create: (data) => api.post('/masking-rules', data),
   update: (id, data) => api.put(`/masking-rules/${id}`, data),
   delete: (id) => api.delete(`/masking-rules/${id}`)
+}
+
+export const workOrderApi = {
+  list: (params) => api.get('/work-orders', { params }),
+  get: (id) => api.get(`/work-orders/${id}`),
+  create: (data) => api.post('/work-orders', data),
+  update: (id, data) => api.put(`/work-orders/${id}`, data),
+  delete: (id) => api.delete(`/work-orders/${id}`),
+  approve: (id) => api.post(`/work-orders/${id}/approve`),
+  reject: (id, data) => api.post(`/work-orders/${id}/reject`, data),
+  execute: (id) => api.post(`/work-orders/${id}/execute`),
+  rollback: (id) => api.post(`/work-orders/${id}/rollback`)
 }
 
 export default api

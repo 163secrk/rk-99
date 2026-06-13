@@ -25,6 +25,10 @@
           <el-icon><Edit /></el-icon>
           <span>SQL编辑器</span>
         </el-menu-item>
+        <el-menu-item index="/work-orders">
+          <el-icon><Tickets /></el-icon>
+          <span>变更工单</span>
+        </el-menu-item>
         <el-menu-item index="/my-logs">
           <el-icon><Memo /></el-icon>
           <span>我的记录</span>
@@ -80,24 +84,17 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { Monitor, Edit, Memo, Coin, Warning, Lock, Document, User, UserFilled, ArrowDown, SwitchButton, DataAnalysis } from '@element-plus/icons-vue'
+import { Monitor, Edit, Memo, Coin, Warning, Lock, Document, User, UserFilled, ArrowDown, SwitchButton, DataAnalysis, Tickets } from '@element-plus/icons-vue'
 
+const route = useRoute()
 const router = useRouter()
 const currentUser = ref(null)
 
 const isLoggedIn = computed(() => {
-  const token = localStorage.getItem('token')
-  const userStr = localStorage.getItem('user')
-  if (token && userStr) {
-    if (!currentUser.value) {
-      currentUser.value = JSON.parse(userStr)
-    }
-    return true
-  }
-  return false
+  return !!currentUser.value
 })
 
 const isDba = computed(() => {
@@ -105,11 +102,22 @@ const isDba = computed(() => {
 })
 
 const loadUser = () => {
+  const token = localStorage.getItem('token')
   const userStr = localStorage.getItem('user')
-  if (userStr) {
+  if (token && userStr) {
     currentUser.value = JSON.parse(userStr)
+  } else {
+    currentUser.value = null
   }
 }
+
+watch(
+  () => route.path,
+  () => {
+    loadUser()
+  },
+  { immediate: true }
+)
 
 const handleCommand = (command) => {
   if (command === 'logout') {

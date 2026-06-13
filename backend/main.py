@@ -330,6 +330,62 @@ def execute_query_with_pagination(conn, sql, page, page_size):
         raise e
 
 
+def execute_single_statement(conn, sql, page, page_size):
+    import pymysql.cursors
+    clean_sql = remove_trailing_semicolon(sql).strip()
+    if not clean_sql:
+        return {
+            "sql": sql,
+            "is_select": False,
+            "columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "affected_rows": 0,
+            "error": None
+        }
+
+    is_select = is_select_query(clean_sql)
+    has_limit = has_limit_clause(clean_sql)
+
+    try:
+        with conn.cursor() as cursor:
+            if is_select and not has_limit:
+                count_sql = f"SELECT COUNT(*) as total FROM ({clean_sql}) AS _count_wrapper"
+                cursor.execute(count_sql)
+                total_rows = cursor.fetchone()["total"]
+
+                offset = (page - 1) * page_size
+                paginated_sql = f"{clean_sql} LIMIT {page_size} OFFSET {offset}"
+                cursor.execute(paginated_sql)
+            else:
+                cursor.execute(clean_sql)
+                total_rows = cursor.rowcount
+
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            rows = cursor.fetchall()
+            rows_list = [[row[col] for col in columns] for row in rows]
+
+            return {
+                "sql": sql,
+                "is_select": is_select,
+                "columns": columns,
+                "rows": rows_list,
+                "total_rows": total_rows if is_select else 0,
+                "affected_rows": 0 if is_select else total_rows,
+                "error": None
+            }
+    except Exception as e:
+        return {
+            "sql": sql,
+            "is_select": is_select,
+            "columns": [],
+            "rows": [],
+            "total_rows": 0,
+            "affected_rows": 0,
+            "error": str(e)
+        }
+
+
 @app.get("/")
 def read_root():
     return {"message": "数据库查询审计系统 API", "version": "1.0.0"}
@@ -516,6 +572,179 @@ def execute_sql(
             execution_time_ms=execution_time_ms
         )
         return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        execution_time_ms = int((time.time() - start_time) * 1000)
+        audit_log = models.AuditLog(
+            datasource_id=ds.id,
+            datasource_name=ds.name,
+            sql_statement=data.sql,
+            result_rows=0,
+            execution_time_ms=execution_time_ms,
+            executed_by=current_user.username,
+            status="failed",
+            blocked=False,
+            error_message=str(e)
+        )
+        db.add(audit_log)
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+@app.post("/api/execute-batch", response_model=schemas.SQLExecuteBatchResponse)
+def execute_sql_batch(
+    data: schemas.SQLExecuteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    ds = db.query(models.DataSource).filter(models.DataSource.id == data.datasource_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    risk_rules = db.query(models.RiskRule).filter(
+        models.RiskRule.is_active == True,
+        models.RiskRule.rule_type == "sensitive_table"
+    ).all()
+
+    is_write = sql_rollback.is_write_operation(data.sql)
+    if is_write and current_user.role != "dba":
+        raise HTTPException(
+            status_code=403,
+            detail="写操作（INSERT/UPDATE/DELETE等）需要提交工单审批，请在工单模块中创建变更工单"
+        )
+
+    statements = sql_rollback._split_statements(sql_rollback._strip_sql_comments(data.sql))
+
+    if len(statements) == 0:
+        raise HTTPException(status_code=400, detail="没有有效的SQL语句")
+
+    all_blocked = False
+    all_block_reasons = []
+
+    for stmt in statements:
+        if not stmt.strip():
+            continue
+        risk_result = sql_risk.run_risk_check(stmt, risk_rules)
+        if risk_result.blocked:
+            all_blocked = True
+            all_block_reasons.extend(risk_result.reasons)
+
+    start_time = time.time()
+    conn = None
+    try:
+        if all_blocked:
+            block_reason_str = "; ".join(all_block_reasons)
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            audit_log = models.AuditLog(
+                datasource_id=ds.id,
+                datasource_name=ds.name,
+                sql_statement=data.sql,
+                result_rows=0,
+                execution_time_ms=execution_time_ms,
+                executed_by=current_user.username,
+                status="blocked",
+                blocked=True,
+                block_reason=block_reason_str,
+                error_message=f"SQL 风险拦截: {block_reason_str}"
+            )
+            db.add(audit_log)
+            db.commit()
+            raise HTTPException(status_code=403, detail=f"SQL 风险拦截: {block_reason_str}")
+
+        conn = get_mysql_connection(
+            host=ds.host,
+            port=ds.port,
+            username=ds.username,
+            password=ds.password,
+            database=ds.database
+        )
+
+        results = []
+        success_count = 0
+        failed_count = 0
+        total_result_rows = 0
+
+        first_select_idx = None
+        for i, stmt in enumerate(statements):
+            clean_stmt = stmt.strip()
+            if not clean_stmt:
+                continue
+            if is_select_query(clean_stmt):
+                first_select_idx = i
+                break
+
+        for i, stmt in enumerate(statements):
+            clean_stmt = stmt.strip()
+            if not clean_stmt:
+                continue
+
+            use_pagination = (first_select_idx is not None and i == first_select_idx)
+            if use_pagination:
+                result = execute_single_statement(conn, clean_stmt, data.page, data.page_size)
+            else:
+                result = execute_single_statement(conn, clean_stmt, 1, 1000)
+
+            if result["error"]:
+                failed_count += 1
+            else:
+                success_count += 1
+                if result["is_select"]:
+                    total_result_rows += result["total_rows"]
+                else:
+                    total_result_rows += result["affected_rows"]
+
+            results.append(result)
+
+        execution_time_ms = int((time.time() - start_time) * 1000)
+
+        warning_reasons = []
+        for stmt in statements:
+            if stmt.strip():
+                risk_result = sql_risk.run_risk_check(stmt, risk_rules)
+                if risk_result.reasons:
+                    warning_reasons.extend(risk_result.reasons)
+        warning_reason_str = "; ".join(list(set(warning_reasons))) if warning_reasons else None
+
+        audit_log = models.AuditLog(
+            datasource_id=ds.id,
+            datasource_name=ds.name,
+            sql_statement=data.sql,
+            result_rows=total_result_rows,
+            execution_time_ms=execution_time_ms,
+            executed_by=current_user.username,
+            status="success" if failed_count == 0 else "failed",
+            blocked=False,
+            block_reason=warning_reason_str
+        )
+        db.add(audit_log)
+        db.commit()
+
+        masking_rules = db.query(models.MaskingRule).filter(
+            models.MaskingRule.is_active == True
+        ).all()
+
+        if masking_rules:
+            for result in results:
+                if result["is_select"] and result["columns"] and not result["error"]:
+                    masked_cols, masked_rows = masking.apply_masking(
+                        result["columns"], result["rows"], masking_rules
+                    )
+                    result["columns"] = masked_cols
+                    result["rows"] = masked_rows
+
+        return schemas.SQLExecuteBatchResponse(
+            results=results,
+            execution_time_ms=execution_time_ms,
+            success_count=success_count,
+            failed_count=failed_count
+        )
     except HTTPException:
         raise
     except Exception as e:
