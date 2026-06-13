@@ -76,3 +76,33 @@ class MaskingRule(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class SqlWorkOrder(Base):
+    __tablename__ = "sql_work_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    datasource_id = Column(Integer, nullable=False)
+    datasource_name = Column(String(255), nullable=False)
+    sql_statement = Column(Text, nullable=False)
+    rollback_sql = Column(Text, nullable=True)
+    status = Column(String(50), nullable=False, default="pending")
+    created_by = Column(String(255), nullable=False)
+    approved_by = Column(String(255), nullable=True)
+    rejected_by = Column(String(255), nullable=True)
+    reject_reason = Column(Text, nullable=True)
+    executed_by = Column(String(255), nullable=True)
+    execution_result = Column(Text, nullable=True)
+    execution_error = Column(Text, nullable=True)
+    rollbacked_by = Column(String(255), nullable=True)
+    rollback_result = Column(Text, nullable=True)
+    rollback_error = Column(Text, nullable=True)
+    affected_rows = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    rejected_at = Column(DateTime(timezone=True), nullable=True)
+    executed_at = Column(DateTime(timezone=True), nullable=True)
+    rollbacked_at = Column(DateTime(timezone=True), nullable=True)

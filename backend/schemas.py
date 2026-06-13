@@ -182,3 +182,63 @@ class MaskingRuleResponse(MaskingRuleBase):
 
     class Config:
         from_attributes = True
+
+
+class SqlWorkOrderCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    datasource_id: int
+    sql_statement: str = Field(..., min_length=1)
+
+
+class SqlWorkOrderUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    sql_statement: Optional[str] = None
+
+
+class SqlWorkOrderApprove(BaseModel):
+    pass
+
+
+class SqlWorkOrderReject(BaseModel):
+    reject_reason: str = Field(..., min_length=1)
+
+
+class SqlWorkOrderResponse(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    datasource_id: int
+    datasource_name: str
+    sql_statement: str
+    rollback_sql: Optional[str] = None
+    status: str
+    created_by: str
+    approved_by: Optional[str] = None
+    rejected_by: Optional[str] = None
+    reject_reason: Optional[str] = None
+    executed_by: Optional[str] = None
+    execution_result: Optional[str] = None
+    execution_error: Optional[str] = None
+    rollbacked_by: Optional[str] = None
+    rollback_result: Optional[str] = None
+    rollback_error: Optional[str] = None
+    affected_rows: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    rollbacked_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PaginatedSqlWorkOrders(BaseModel):
+    items: List[SqlWorkOrderResponse]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int

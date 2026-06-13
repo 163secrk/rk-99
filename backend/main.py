@@ -15,6 +15,7 @@ import models
 import schemas
 import sql_risk
 import masking
+import sql_rollback
 
 SECRET_KEY = "your-secret-key-change-in-production-2024"
 ALGORITHM = "HS256"
@@ -438,6 +439,13 @@ def execute_sql(
 
     risk_result = sql_risk.run_risk_check(data.sql, risk_rules)
 
+    is_write = sql_rollback.is_write_operation(data.sql)
+    if is_write and current_user.role != "dba":
+        raise HTTPException(
+            status_code=403,
+            detail="写操作（INSERT/UPDATE/DELETE等）需要提交工单审批，请在工单模块中创建变更工单"
+        )
+
     start_time = time.time()
     conn = None
     try:
@@ -750,6 +758,462 @@ def delete_masking_rule(
     db.delete(rule)
     db.commit()
     return {"message": "删除成功"}
+
+
+@app.get("/api/work-orders", response_model=schemas.PaginatedSqlWorkOrders)
+def list_work_orders(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    status: Optional[str] = None,
+    datasource_id: Optional[int] = None,
+    mine: Optional[bool] = False,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    query = db.query(models.SqlWorkOrder)
+    if status:
+        query = query.filter(models.SqlWorkOrder.status == status)
+    if datasource_id:
+        query = query.filter(models.SqlWorkOrder.datasource_id == datasource_id)
+    if mine:
+        query = query.filter(models.SqlWorkOrder.created_by == current_user.username)
+
+    total = query.count()
+    total_pages = math.ceil(total / page_size) if total > 0 else 0
+    offset = (page - 1) * page_size
+    items = query.order_by(models.SqlWorkOrder.id.desc()).offset(offset).limit(page_size).all()
+
+    return schemas.PaginatedSqlWorkOrders(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages
+    )
+
+
+@app.get("/api/work-orders/{order_id}", response_model=schemas.SqlWorkOrderResponse)
+def get_work_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return order
+
+
+@app.post("/api/work-orders", response_model=schemas.SqlWorkOrderResponse)
+def create_work_order(
+    data: schemas.SqlWorkOrderCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    ds = db.query(models.DataSource).filter(models.DataSource.id == data.datasource_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    if not sql_rollback.is_write_operation(data.sql_statement):
+        raise HTTPException(status_code=400, detail="只有写操作（INSERT/UPDATE/DELETE等）需要提交工单审批，查询语句可直接执行")
+
+    risk_rules = db.query(models.RiskRule).filter(
+        models.RiskRule.is_active == True,
+        models.RiskRule.rule_type == "sensitive_table"
+    ).all()
+
+    risk_result = sql_risk.run_risk_check(data.sql_statement, risk_rules)
+    if risk_result.blocked:
+        raise HTTPException(status_code=403, detail=f"SQL风险检查不通过: {'; '.join(risk_result.reasons)}")
+
+    order = models.SqlWorkOrder(
+        title=data.title,
+        description=data.description,
+        datasource_id=data.datasource_id,
+        datasource_name=ds.name,
+        sql_statement=data.sql_statement,
+        status="pending",
+        created_by=current_user.username
+    )
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+@app.put("/api/work-orders/{order_id}", response_model=schemas.SqlWorkOrderResponse)
+def update_work_order(
+    order_id: int,
+    data: schemas.SqlWorkOrderUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if order.created_by != current_user.username and current_user.role != "dba":
+        raise HTTPException(status_code=403, detail="只能修改自己创建的工单")
+
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="只有待审批状态的工单可以修改")
+
+    if data.title is not None:
+        order.title = data.title
+    if data.description is not None:
+        order.description = data.description
+    if data.sql_statement is not None:
+        if not sql_rollback.is_write_operation(data.sql_statement):
+            raise HTTPException(status_code=400, detail="只有写操作需要提交工单审批")
+        order.sql_statement = data.sql_statement
+
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+@app.delete("/api/work-orders/{order_id}")
+def delete_work_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if order.created_by != current_user.username and current_user.role != "dba":
+        raise HTTPException(status_code=403, detail="只能删除自己创建的工单")
+
+    if order.status not in ["pending", "rejected"]:
+        raise HTTPException(status_code=400, detail="只能删除待审批或已拒绝的工单")
+
+    db.delete(order)
+    db.commit()
+    return {"message": "删除成功"}
+
+
+@app.post("/api/work-orders/{order_id}/approve", response_model=schemas.SqlWorkOrderResponse)
+def approve_work_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="只有待审批状态的工单可以审批")
+
+    order.status = "approved"
+    order.approved_by = current_user.username
+    order.approved_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+@app.post("/api/work-orders/{order_id}/reject", response_model=schemas.SqlWorkOrderResponse)
+def reject_work_order(
+    order_id: int,
+    data: schemas.SqlWorkOrderReject,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="只有待审批状态的工单可以拒绝")
+
+    order.status = "rejected"
+    order.rejected_by = current_user.username
+    order.rejected_at = datetime.utcnow()
+    order.reject_reason = data.reject_reason
+
+    db.commit()
+    db.refresh(order)
+    return order
+
+
+@app.post("/api/work-orders/{order_id}/execute", response_model=schemas.SqlWorkOrderResponse)
+def execute_work_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if order.status != "approved":
+        raise HTTPException(status_code=400, detail="只有已审批通过的工单可以执行")
+
+    ds = db.query(models.DataSource).filter(models.DataSource.id == order.datasource_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    conn = None
+    try:
+        conn = get_mysql_connection(
+            host=ds.host,
+            port=ds.port,
+            username=ds.username,
+            password=ds.password,
+            database=ds.database
+        )
+
+        rollback_sql = _generate_rollback_with_data(conn, order.sql_statement)
+        order.rollback_sql = rollback_sql
+
+        with conn.cursor() as cursor:
+            statements = sql_rollback._split_statements(sql_rollback._strip_sql_comments(order.sql_statement))
+            total_affected = 0
+            for stmt in statements:
+                if stmt.strip():
+                    cursor.execute(stmt)
+                    total_affected += cursor.rowcount
+            conn.commit()
+
+        order.status = "executed"
+        order.executed_by = current_user.username
+        order.executed_at = datetime.utcnow()
+        order.execution_result = f"执行成功，影响 {total_affected} 行"
+        order.affected_rows = total_affected
+
+        audit_log = models.AuditLog(
+            datasource_id=ds.id,
+            datasource_name=ds.name,
+            sql_statement=order.sql_statement,
+            result_rows=total_affected,
+            execution_time_ms=0,
+            executed_by=current_user.username,
+            status="success",
+            blocked=False,
+            block_reason=f"工单执行 #{order.id}"
+        )
+        db.add(audit_log)
+
+        db.commit()
+        db.refresh(order)
+        return order
+
+    except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        order.status = "approved"
+        order.execution_error = str(e)
+        db.commit()
+        db.refresh(order)
+        raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+@app.post("/api/work-orders/{order_id}/rollback", response_model=schemas.SqlWorkOrderResponse)
+def rollback_work_order(
+    order_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    order = db.query(models.SqlWorkOrder).filter(models.SqlWorkOrder.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    if order.status != "executed":
+        raise HTTPException(status_code=400, detail="只有已执行的工单可以回滚")
+
+    if not order.rollback_sql:
+        raise HTTPException(status_code=400, detail="没有找到回滚SQL，无法回滚")
+
+    ds = db.query(models.DataSource).filter(models.DataSource.id == order.datasource_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    conn = None
+    try:
+        conn = get_mysql_connection(
+            host=ds.host,
+            port=ds.port,
+            username=ds.username,
+            password=ds.password,
+            database=ds.database
+        )
+
+        with conn.cursor() as cursor:
+            statements = sql_rollback._split_statements(sql_rollback._strip_sql_comments(order.rollback_sql))
+            total_affected = 0
+            for stmt in statements:
+                stmt = stmt.strip()
+                if stmt and not stmt.startswith('--'):
+                    cursor.execute(stmt)
+                    total_affected += cursor.rowcount
+            conn.commit()
+
+        order.status = "rollbacked"
+        order.rollbacked_by = current_user.username
+        order.rollbacked_at = datetime.utcnow()
+        order.rollback_result = f"回滚成功，影响 {total_affected} 行"
+
+        audit_log = models.AuditLog(
+            datasource_id=ds.id,
+            datasource_name=ds.name,
+            sql_statement=order.rollback_sql,
+            result_rows=total_affected,
+            execution_time_ms=0,
+            executed_by=current_user.username,
+            status="success",
+            blocked=False,
+            block_reason=f"工单回滚 #{order.id}"
+        )
+        db.add(audit_log)
+
+        db.commit()
+        db.refresh(order)
+        return order
+
+    except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+            except:
+                pass
+        order.rollback_error = str(e)
+        db.commit()
+        db.refresh(order)
+        raise HTTPException(status_code=500, detail=f"回滚失败: {str(e)}")
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def _generate_rollback_with_data(conn, sql: str) -> str:
+    sql_clean = sql_rollback._strip_sql_comments(sql)
+    statements = sql_rollback._split_statements(sql_clean)
+
+    rollback_parts = []
+
+    for stmt in statements:
+        stmt = stmt.strip()
+        if not stmt:
+            continue
+
+        first_kw = sql_rollback._get_first_keyword(stmt)
+
+        if first_kw == 'INSERT':
+            table = sql_rollback._extract_table_name(stmt, 'INSERT')
+            columns, values = sql_rollback._extract_insert_columns_values(stmt)
+            if table and columns and values:
+                where_conditions = []
+                for i, col in enumerate(columns):
+                    if i < len(values):
+                        where_conditions.append(f"{col} = {values[i]}")
+                where_clause = ' AND '.join(where_conditions)
+                rollback_parts.append(f"DELETE FROM {table} WHERE {where_clause}")
+
+        elif first_kw == 'UPDATE':
+            table = sql_rollback._extract_table_name(stmt, 'UPDATE')
+            where_clause = sql_rollback._extract_where_clause(stmt)
+            if table and where_clause:
+                try:
+                    with conn.cursor() as cursor:
+                        query_sql = f"SELECT * FROM {table} WHERE {where_clause}"
+                        cursor.execute(query_sql)
+                        old_rows = cursor.fetchall()
+                        if old_rows:
+                            for row in old_rows:
+                                set_parts = []
+                                where_parts = []
+                                for col, val in row.items():
+                                    if val is None:
+                                        set_parts.append(f"{col} = NULL")
+                                    elif isinstance(val, (int, float)):
+                                        set_parts.append(f"{col} = {val}")
+                                    else:
+                                        escaped_val = str(val).replace("'", "''")
+                                        set_parts.append(f"{col} = '{escaped_val}'")
+                                set_clause = ', '.join(set_parts)
+                                pk_where = _build_primary_key_where(conn, table, row)
+                                if pk_where:
+                                    rollback_parts.append(f"UPDATE {table} SET {set_clause} WHERE {pk_where}")
+                                else:
+                                    rollback_parts.append(f"UPDATE {table} SET {set_clause} WHERE {where_clause} LIMIT 1")
+                        else:
+                            rollback_parts.append(f"-- 没有找到旧数据，跳过: {stmt[:50]}...")
+                except Exception as e:
+                    rollback_parts.append(f"-- 查询旧数据失败: {str(e)}")
+
+        elif first_kw == 'DELETE':
+            table = sql_rollback._extract_table_name(stmt, 'DELETE')
+            where_clause = sql_rollback._extract_where_clause(stmt)
+            if table and where_clause:
+                try:
+                    with conn.cursor() as cursor:
+                        query_sql = f"SELECT * FROM {table} WHERE {where_clause}"
+                        cursor.execute(query_sql)
+                        old_rows = cursor.fetchall()
+                        if old_rows:
+                            for row in old_rows:
+                                columns = []
+                                values = []
+                                for col, val in row.items():
+                                    columns.append(col)
+                                    if val is None:
+                                        values.append('NULL')
+                                    elif isinstance(val, (int, float)):
+                                        values.append(str(val))
+                                    else:
+                                        escaped_val = str(val).replace("'", "''")
+                                        values.append(f"'{escaped_val}'")
+                                cols_str = ', '.join(columns)
+                                vals_str = ', '.join(values)
+                                rollback_parts.append(f"INSERT INTO {table} ({cols_str}) VALUES ({vals_str})")
+                        else:
+                            rollback_parts.append(f"-- 没有找到旧数据，跳过: {stmt[:50]}...")
+                except Exception as e:
+                    rollback_parts.append(f"-- 查询旧数据失败: {str(e)}")
+        else:
+            rollback_parts.append(f"-- 无法生成回滚SQL: {stmt[:80]}...")
+
+    return ';\n'.join(rollback_parts) + ';' if rollback_parts else ''
+
+
+def _build_primary_key_where(conn, table: str, row: dict) -> Optional[str]:
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(f"SHOW KEYS FROM {table} WHERE Key_name = 'PRIMARY'")
+            pk_rows = cursor.fetchall()
+            if pk_rows:
+                pk_cols = [pk['Column_name'] for pk in pk_rows]
+                where_parts = []
+                for col in pk_cols:
+                    if col in row:
+                        val = row[col]
+                        if val is None:
+                            where_parts.append(f"{col} IS NULL")
+                        elif isinstance(val, (int, float)):
+                            where_parts.append(f"{col} = {val}")
+                        else:
+                            escaped_val = str(val).replace("'", "''")
+                            where_parts.append(f"{col} = '{escaped_val}'")
+                if where_parts:
+                    return ' AND '.join(where_parts)
+    except:
+        pass
+    return None
 
 
 if __name__ == "__main__":
