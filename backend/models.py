@@ -48,3 +48,19 @@ class RiskRule(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class MaskingRule(Base):
+    __tablename__ = "masking_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    column_pattern = Column(Text, nullable=False)
+    mask_type = Column(String(50), nullable=False)
+    keep_prefix = Column(Integer, default=0)
+    keep_suffix = Column(Integer, default=0)
+    mask_char = Column(String(10), default="*")
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

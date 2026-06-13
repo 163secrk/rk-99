@@ -22,6 +22,14 @@
           <el-icon><Coin /></el-icon>
           <span>数据源管理</span>
         </el-menu-item>
+        <el-menu-item index="/risk-rules">
+          <el-icon><Warning /></el-icon>
+          <span>风险规则</span>
+        </el-menu-item>
+        <el-menu-item index="/masking-rules">
+          <el-icon><Lock /></el-icon>
+          <span>脱敏规则</span>
+        </el-menu-item>
         <el-menu-item index="/audit-logs">
           <el-icon><Document /></el-icon>
           <span>审计日志</span>

@@ -10,6 +10,7 @@ from database import engine, get_db, Base
 import models
 import schemas
 import sql_risk
+import masking
 
 Base.metadata.create_all(bind=engine)
 
@@ -228,6 +229,13 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
         db.add(audit_log)
         db.commit()
 
+        masking_rules = db.query(models.MaskingRule).filter(
+            models.MaskingRule.is_active == True
+        ).all()
+
+        if masking_rules:
+            columns, rows_list = masking.apply_masking(columns, rows_list, masking_rules)
+
         resp = schemas.SQLExecuteResponse(
             columns=columns,
             rows=rows_list,
@@ -377,6 +385,64 @@ def check_sql_risk(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db
     ).all()
     result = sql_risk.run_risk_check(data.sql, risk_rules)
     return result
+
+
+@app.get("/api/masking-rules", response_model=list[schemas.MaskingRuleResponse])
+def list_masking_rules(
+    is_active: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.MaskingRule)
+    if is_active is not None:
+        query = query.filter(models.MaskingRule.is_active == is_active)
+    return query.order_by(models.MaskingRule.id.desc()).all()
+
+
+@app.get("/api/masking-rules/{rule_id}", response_model=schemas.MaskingRuleResponse)
+def get_masking_rule(rule_id: int, db: Session = Depends(get_db)):
+    rule = db.query(models.MaskingRule).filter(models.MaskingRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="脱敏规则不存在")
+    return rule
+
+
+@app.post("/api/masking-rules", response_model=schemas.MaskingRuleResponse)
+def create_masking_rule(data: schemas.MaskingRuleCreate, db: Session = Depends(get_db)):
+    try:
+        re.compile(data.column_pattern)
+    except re.error as e:
+        raise HTTPException(status_code=400, detail=f"列名匹配正则表达式无效: {str(e)}")
+    rule = models.MaskingRule(**data.model_dump())
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@app.put("/api/masking-rules/{rule_id}", response_model=schemas.MaskingRuleResponse)
+def update_masking_rule(rule_id: int, data: schemas.MaskingRuleUpdate, db: Session = Depends(get_db)):
+    rule = db.query(models.MaskingRule).filter(models.MaskingRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="脱敏规则不存在")
+    try:
+        re.compile(data.column_pattern)
+    except re.error as e:
+        raise HTTPException(status_code=400, detail=f"列名匹配正则表达式无效: {str(e)}")
+    for key, value in data.model_dump().items():
+        setattr(rule, key, value)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@app.delete("/api/masking-rules/{rule_id}")
+def delete_masking_rule(rule_id: int, db: Session = Depends(get_db)):
+    rule = db.query(models.MaskingRule).filter(models.MaskingRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="脱敏规则不存在")
+    db.delete(rule)
+    db.commit()
+    return {"message": "删除成功"}
 
 
 if __name__ == "__main__":

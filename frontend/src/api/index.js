@@ -40,4 +40,12 @@ export const riskRuleApi = {
   check: (data) => api.post('/risk-check', data)
 }
 
+export const maskingRuleApi = {
+  list: (params) => api.get('/masking-rules', { params }),
+  get: (id) => api.get(`/masking-rules/${id}`),
+  create: (data) => api.post('/masking-rules', data),
+  update: (id, data) => api.put(`/masking-rules/${id}`, data),
+  delete: (id) => api.delete(`/masking-rules/${id}`)
+}
+
 export default api

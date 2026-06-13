@@ -114,3 +114,31 @@ class RiskCheckResultResponse(BaseModel):
     blocked: bool
     reasons: List[str]
     severity: str
+
+
+class MaskingRuleBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    column_pattern: str = Field(..., min_length=1)
+    mask_type: str = Field(..., pattern="^(phone|id_card|salary|name|custom)$")
+    keep_prefix: int = Field(default=0, ge=0)
+    keep_suffix: int = Field(default=0, ge=0)
+    mask_char: str = Field(default="*", max_length=10)
+    description: Optional[str] = None
+    is_active: bool = True
+
+
+class MaskingRuleCreate(MaskingRuleBase):
+    pass
+
+
+class MaskingRuleUpdate(MaskingRuleBase):
+    pass
+
+
+class MaskingRuleResponse(MaskingRuleBase):
+    id: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
