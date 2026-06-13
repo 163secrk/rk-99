@@ -70,7 +70,8 @@ export const queryApi = {
 
 export const auditApi = {
   list: (params) => api.get('/audit-logs', { params }),
-  delete: (id) => api.delete(`/audit-logs/${id}`)
+  delete: (id) => api.delete(`/audit-logs/${id}`),
+  getStatistics: (params) => api.get('/audit-statistics', { params })
 }
 
 export const riskRuleApi = {

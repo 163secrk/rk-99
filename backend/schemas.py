@@ -242,3 +242,34 @@ class PaginatedSqlWorkOrders(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class QueryTrendItem(BaseModel):
+    date: str
+    count: int
+
+
+class RiskDistributionItem(BaseModel):
+    name: str
+    value: int
+
+
+class TopUserItem(BaseModel):
+    username: str
+    count: int
+
+
+class DataSourceStatsItem(BaseModel):
+    name: str
+    count: int
+
+
+class AuditStatisticsResponse(BaseModel):
+    total_queries: int
+    blocked_queries: int
+    success_queries: int
+    failed_queries: int
+    query_trend: List[QueryTrendItem]
+    risk_distribution: List[RiskDistributionItem]
+    top_users: List[TopUserItem]
+    datasource_stats: List[DataSourceStatsItem]

@@ -7,6 +7,7 @@ import MaskingRules from '@/views/MaskingRules.vue'
 import Login from '@/views/Login.vue'
 import UserManagement from '@/views/UserManagement.vue'
 import MyLogs from '@/views/MyLogs.vue'
+import Dashboard from '@/views/Dashboard.vue'
 
 const routes = [
   {
@@ -20,6 +21,12 @@ const routes = [
     name: 'editor',
     component: SqlEditor,
     meta: { title: 'SQL编辑器', roles: ['dba', 'developer'] }
+  },
+  {
+    path: '/dashboard',
+    name: 'dashboard',
+    component: Dashboard,
+    meta: { title: '审计分析看板', roles: ['dba'] }
   },
   {
     path: '/my-logs',

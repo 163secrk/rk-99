@@ -17,6 +17,10 @@
         text-color="#fff"
         active-text-color="#ffd04b"
       >
+        <el-menu-item v-if="isDba" index="/dashboard">
+          <el-icon><DataAnalysis /></el-icon>
+          <span>审计看板</span>
+        </el-menu-item>
         <el-menu-item index="/">
           <el-icon><Edit /></el-icon>
           <span>SQL编辑器</span>
@@ -79,7 +83,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { Monitor, Edit, Memo, Coin, Warning, Lock, Document, User, UserFilled, ArrowDown, SwitchButton } from '@element-plus/icons-vue'
+import { Monitor, Edit, Memo, Coin, Warning, Lock, Document, User, UserFilled, ArrowDown, SwitchButton, DataAnalysis } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const currentUser = ref(null)

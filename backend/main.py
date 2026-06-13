@@ -2,8 +2,9 @@ from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import time
@@ -585,6 +586,110 @@ def delete_audit_log(
     db.delete(log)
     db.commit()
     return {"message": "删除成功"}
+
+
+@app.get("/api/audit-statistics", response_model=schemas.AuditStatisticsResponse)
+def get_audit_statistics(
+    days: int = Query(7, ge=1, le=90),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=days - 1)
+    start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    total_queries = db.query(models.AuditLog).filter(
+        models.AuditLog.executed_at >= start_date
+    ).count()
+
+    blocked_queries = db.query(models.AuditLog).filter(
+        models.AuditLog.executed_at >= start_date,
+        models.AuditLog.blocked == True
+    ).count()
+
+    success_queries = db.query(models.AuditLog).filter(
+        models.AuditLog.executed_at >= start_date,
+        models.AuditLog.status == "success",
+        models.AuditLog.blocked == False
+    ).count()
+
+    failed_queries = db.query(models.AuditLog).filter(
+        models.AuditLog.executed_at >= start_date,
+        models.AuditLog.status == "failed"
+    ).count()
+
+    trend_results = db.query(
+        func.date(models.AuditLog.executed_at).label('date'),
+        func.count(models.AuditLog.id).label('count')
+    ).filter(
+        models.AuditLog.executed_at >= start_date
+    ).group_by(
+        func.date(models.AuditLog.executed_at)
+    ).order_by(
+        'date'
+    ).all()
+
+    trend_map = {}
+    for r in trend_results:
+        trend_map[r.date] = r.count
+
+    query_trend = []
+    for i in range(days):
+        d = start_date + timedelta(days=i)
+        date_str = d.strftime('%Y-%m-%d')
+        query_trend.append(schemas.QueryTrendItem(
+            date=date_str,
+            count=trend_map.get(date_str, 0)
+        ))
+
+    risk_distribution = [
+        schemas.RiskDistributionItem(name="成功执行", value=success_queries),
+        schemas.RiskDistributionItem(name="风险拦截", value=blocked_queries),
+        schemas.RiskDistributionItem(name="执行失败", value=failed_queries),
+    ]
+
+    top_user_results = db.query(
+        models.AuditLog.executed_by,
+        func.count(models.AuditLog.id).label('count')
+    ).filter(
+        models.AuditLog.executed_at >= start_date
+    ).group_by(
+        models.AuditLog.executed_by
+    ).order_by(
+        func.count(models.AuditLog.id).desc()
+    ).limit(10).all()
+
+    top_users = [
+        schemas.TopUserItem(username=r.executed_by or 'anonymous', count=r.count)
+        for r in top_user_results
+    ]
+
+    datasource_results = db.query(
+        models.AuditLog.datasource_name,
+        func.count(models.AuditLog.id).label('count')
+    ).filter(
+        models.AuditLog.executed_at >= start_date
+    ).group_by(
+        models.AuditLog.datasource_name
+    ).order_by(
+        func.count(models.AuditLog.id).desc()
+    ).all()
+
+    datasource_stats = [
+        schemas.DataSourceStatsItem(name=r.datasource_name, count=r.count)
+        for r in datasource_results
+    ]
+
+    return schemas.AuditStatisticsResponse(
+        total_queries=total_queries,
+        blocked_queries=blocked_queries,
+        success_queries=success_queries,
+        failed_queries=failed_queries,
+        query_trend=query_trend,
+        risk_distribution=risk_distribution,
+        top_users=top_users,
+        datasource_stats=datasource_stats
+    )
 
 
 @app.get("/api/risk-rules", response_model=list[schemas.RiskRuleResponse])
