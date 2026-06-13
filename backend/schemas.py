@@ -4,6 +4,46 @@ from datetime import datetime
 from typing import List, Any
 
 
+class UserRegister(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6, max_length=100)
+
+
+class UserLogin(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6, max_length=100)
+
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    role: str
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class UserUpdate(BaseModel):
+    role: Optional[str] = Field(None, pattern="^(dba|developer)$")
+    is_active: Optional[bool] = None
+    password: Optional[str] = Field(None, min_length=6, max_length=100)
+
+
+class UserCreateByAdmin(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6, max_length=100)
+    role: str = Field(default="developer", pattern="^(dba|developer)$")
+    is_active: bool = True
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
 class DataSourceBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     host: str = Field(..., min_length=1, max_length=255)

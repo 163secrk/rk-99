@@ -5,13 +5,55 @@ const api = axios.create({
   timeout: 60000
 })
 
+api.interceptors.request.use(
+  config => {
+    const token = localStorage.getItem('token')
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
+  error => {
+    return Promise.reject(error)
+  }
+)
+
 api.interceptors.response.use(
   response => response.data,
   error => {
     console.error('API Error:', error)
+    if (error.response?.status === 401) {
+      localStorage.removeItem('token')
+      localStorage.removeItem('user')
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
     return Promise.reject(error)
   }
 )
+
+export const authApi = {
+  login: (username, password) => {
+    const formData = new FormData()
+    formData.append('username', username)
+    formData.append('password', password)
+    return api.post('/login', formData)
+  },
+  register: (data) => api.post('/register', data),
+  getCurrentUser: () => api.get('/me')
+}
+
+export const userApi = {
+  list: () => api.get('/users'),
+  create: (data) => api.post('/users', data),
+  update: (id, data) => api.put(`/users/${id}`, data),
+  delete: (id) => api.delete(`/users/${id}`)
+}
+
+export const myLogApi = {
+  list: (params) => api.get('/my-logs', { params })
+}
 
 export const datasourceApi = {
   list: () => api.get('/datasources'),

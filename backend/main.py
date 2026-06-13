@@ -1,7 +1,11 @@
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from typing import Optional
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 import time
 import math
 import re
@@ -12,7 +16,94 @@ import schemas
 import sql_risk
 import masking
 
+SECRET_KEY = "your-secret-key-change-in-production-2024"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/login")
+
 Base.metadata.create_all(bind=engine)
+
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="无法验证凭据",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if user is None:
+        raise credentials_exception
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="用户已被禁用")
+    return user
+
+
+def require_role(allowed_roles: list):
+    def role_checker(current_user: models.User = Depends(get_current_user)):
+        if current_user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="权限不足"
+            )
+        return current_user
+    return role_checker
+
+
+def init_default_admin(db: Session):
+    admin = db.query(models.User).filter(models.User.username == "admin").first()
+    if not admin:
+        admin = models.User(
+            username="admin",
+            password_hash=get_password_hash("admin123"),
+            role="dba",
+            is_active=True
+        )
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+    dev = db.query(models.User).filter(models.User.username == "developer").first()
+    if not dev:
+        dev = models.User(
+            username="developer",
+            password_hash=get_password_hash("dev123456"),
+            role="developer",
+            is_active=True
+        )
+        db.add(dev)
+        db.commit()
+        db.refresh(dev)
+
+
+with Session(bind=engine) as init_db:
+    init_default_admin(init_db)
 
 app = FastAPI(title="数据库查询审计系统", version="1.0.0")
 
@@ -23,6 +114,147 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.post("/api/register", response_model=schemas.TokenResponse)
+def register(user_data: schemas.UserRegister, db: Session = Depends(get_db)):
+    existing_user = db.query(models.User).filter(models.User.username == user_data.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="用户名已存在")
+    user = models.User(
+        username=user_data.username,
+        password_hash=get_password_hash(user_data.password),
+        role="developer",
+        is_active=True
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role},
+        expires_delta=access_token_expires
+    )
+    return schemas.TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=schemas.UserResponse.model_validate(user)
+    )
+
+
+@app.post("/api/login", response_model=schemas.TokenResponse)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="用户已被禁用")
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role},
+        expires_delta=access_token_expires
+    )
+    return schemas.TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=schemas.UserResponse.model_validate(user)
+    )
+
+
+@app.get("/api/me", response_model=schemas.UserResponse)
+def read_current_user(current_user: models.User = Depends(get_current_user)):
+    return current_user
+
+
+@app.get("/api/users", response_model=list[schemas.UserResponse])
+def list_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    return db.query(models.User).order_by(models.User.id.desc()).all()
+
+
+@app.post("/api/users", response_model=schemas.UserResponse)
+def create_user_by_admin(
+    data: schemas.UserCreateByAdmin,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    existing_user = db.query(models.User).filter(models.User.username == data.username).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="用户名已存在")
+    user = models.User(
+        username=data.username,
+        password_hash=get_password_hash(data.password),
+        role=data.role,
+        is_active=data.is_active
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.put("/api/users/{user_id}", response_model=schemas.UserResponse)
+def update_user(
+    user_id: int,
+    data: schemas.UserUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if data.role is not None:
+        user.role = data.role
+    if data.is_active is not None:
+        user.is_active = data.is_active
+    if data.password is not None:
+        user.password_hash = get_password_hash(data.password)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="不能删除自己")
+    db.delete(user)
+    db.commit()
+    return {"message": "删除成功"}
+
+
+@app.get("/api/my-logs", response_model=schemas.PaginatedAuditLogs)
+def list_my_logs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    query = db.query(models.AuditLog).filter(models.AuditLog.executed_by == current_user.username)
+    total = query.count()
+    total_pages = math.ceil(total / page_size) if total > 0 else 0
+    offset = (page - 1) * page_size
+    items = query.order_by(models.AuditLog.id.desc()).offset(offset).limit(page_size).all()
+    return schemas.PaginatedAuditLogs(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages
+    )
 
 
 def get_mysql_connection(host, port, username, password, database):
@@ -102,12 +334,19 @@ def read_root():
 
 
 @app.get("/api/datasources", response_model=list[schemas.DataSourceResponse])
-def list_datasources(db: Session = Depends(get_db)):
+def list_datasources(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     return db.query(models.DataSource).order_by(models.DataSource.id.desc()).all()
 
 
 @app.get("/api/datasources/{ds_id}", response_model=schemas.DataSourceResponse)
-def get_datasource(ds_id: int, db: Session = Depends(get_db)):
+def get_datasource(
+    ds_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     ds = db.query(models.DataSource).filter(models.DataSource.id == ds_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
@@ -115,7 +354,11 @@ def get_datasource(ds_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/datasources", response_model=schemas.DataSourceResponse)
-def create_datasource(data: schemas.DataSourceCreate, db: Session = Depends(get_db)):
+def create_datasource(
+    data: schemas.DataSourceCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     ds = models.DataSource(**data.model_dump())
     db.add(ds)
     db.commit()
@@ -124,7 +367,12 @@ def create_datasource(data: schemas.DataSourceCreate, db: Session = Depends(get_
 
 
 @app.put("/api/datasources/{ds_id}", response_model=schemas.DataSourceResponse)
-def update_datasource(ds_id: int, data: schemas.DataSourceUpdate, db: Session = Depends(get_db)):
+def update_datasource(
+    ds_id: int,
+    data: schemas.DataSourceUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     ds = db.query(models.DataSource).filter(models.DataSource.id == ds_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
@@ -136,7 +384,11 @@ def update_datasource(ds_id: int, data: schemas.DataSourceUpdate, db: Session = 
 
 
 @app.delete("/api/datasources/{ds_id}")
-def delete_datasource(ds_id: int, db: Session = Depends(get_db)):
+def delete_datasource(
+    ds_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     ds = db.query(models.DataSource).filter(models.DataSource.id == ds_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
@@ -146,7 +398,10 @@ def delete_datasource(ds_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/datasources/test")
-def test_connection(data: schemas.TestConnectionRequest):
+def test_connection(
+    data: schemas.TestConnectionRequest,
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     try:
         conn = get_mysql_connection(
             host=data.host,
@@ -167,7 +422,11 @@ def test_connection(data: schemas.TestConnectionRequest):
 
 
 @app.post("/api/execute", response_model=schemas.SQLExecuteResponse)
-def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
+def execute_sql(
+    data: schemas.SQLExecuteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     ds = db.query(models.DataSource).filter(models.DataSource.id == data.datasource_id).first()
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
@@ -191,6 +450,7 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
                 sql_statement=data.sql,
                 result_rows=0,
                 execution_time_ms=execution_time_ms,
+                executed_by=current_user.username,
                 status="blocked",
                 blocked=True,
                 block_reason=block_reason_str,
@@ -222,6 +482,7 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
             sql_statement=data.sql,
             result_rows=total_rows,
             execution_time_ms=execution_time_ms,
+            executed_by=current_user.username,
             status="success",
             blocked=False,
             block_reason=warning_reason
@@ -256,6 +517,7 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
             sql_statement=data.sql,
             result_rows=0,
             execution_time_ms=execution_time_ms,
+            executed_by=current_user.username,
             status="failed",
             blocked=False,
             error_message=str(e)
@@ -278,7 +540,8 @@ def list_audit_logs(
     datasource_id: Optional[int] = None,
     status: Optional[str] = None,
     blocked: Optional[bool] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
 ):
     query = db.query(models.AuditLog)
     if datasource_id:
@@ -303,7 +566,11 @@ def list_audit_logs(
 
 
 @app.delete("/api/audit-logs/{log_id}")
-def delete_audit_log(log_id: int, db: Session = Depends(get_db)):
+def delete_audit_log(
+    log_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     log = db.query(models.AuditLog).filter(models.AuditLog.id == log_id).first()
     if not log:
         raise HTTPException(status_code=404, detail="日志不存在")
@@ -316,7 +583,8 @@ def delete_audit_log(log_id: int, db: Session = Depends(get_db)):
 def list_risk_rules(
     rule_type: Optional[str] = None,
     is_active: Optional[bool] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
 ):
     query = db.query(models.RiskRule)
     if rule_type:
@@ -327,7 +595,11 @@ def list_risk_rules(
 
 
 @app.get("/api/risk-rules/{rule_id}", response_model=schemas.RiskRuleResponse)
-def get_risk_rule(rule_id: int, db: Session = Depends(get_db)):
+def get_risk_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     rule = db.query(models.RiskRule).filter(models.RiskRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="规则不存在")
@@ -335,7 +607,11 @@ def get_risk_rule(rule_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/risk-rules", response_model=schemas.RiskRuleResponse)
-def create_risk_rule(data: schemas.RiskRuleCreate, db: Session = Depends(get_db)):
+def create_risk_rule(
+    data: schemas.RiskRuleCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     if data.rule_type == "sensitive_table":
         try:
             import re
@@ -350,7 +626,12 @@ def create_risk_rule(data: schemas.RiskRuleCreate, db: Session = Depends(get_db)
 
 
 @app.put("/api/risk-rules/{rule_id}", response_model=schemas.RiskRuleResponse)
-def update_risk_rule(rule_id: int, data: schemas.RiskRuleUpdate, db: Session = Depends(get_db)):
+def update_risk_rule(
+    rule_id: int,
+    data: schemas.RiskRuleUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     rule = db.query(models.RiskRule).filter(models.RiskRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="规则不存在")
@@ -368,7 +649,11 @@ def update_risk_rule(rule_id: int, data: schemas.RiskRuleUpdate, db: Session = D
 
 
 @app.delete("/api/risk-rules/{rule_id}")
-def delete_risk_rule(rule_id: int, db: Session = Depends(get_db)):
+def delete_risk_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     rule = db.query(models.RiskRule).filter(models.RiskRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="规则不存在")
@@ -378,7 +663,11 @@ def delete_risk_rule(rule_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/risk-check", response_model=schemas.RiskCheckResultResponse)
-def check_sql_risk(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
+def check_sql_risk(
+    data: schemas.SQLExecuteRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
     risk_rules = db.query(models.RiskRule).filter(
         models.RiskRule.is_active == True,
         models.RiskRule.rule_type == "sensitive_table"
@@ -390,7 +679,8 @@ def check_sql_risk(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db
 @app.get("/api/masking-rules", response_model=list[schemas.MaskingRuleResponse])
 def list_masking_rules(
     is_active: Optional[bool] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
 ):
     query = db.query(models.MaskingRule)
     if is_active is not None:
@@ -399,7 +689,11 @@ def list_masking_rules(
 
 
 @app.get("/api/masking-rules/{rule_id}", response_model=schemas.MaskingRuleResponse)
-def get_masking_rule(rule_id: int, db: Session = Depends(get_db)):
+def get_masking_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     rule = db.query(models.MaskingRule).filter(models.MaskingRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="脱敏规则不存在")
@@ -407,7 +701,11 @@ def get_masking_rule(rule_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/masking-rules", response_model=schemas.MaskingRuleResponse)
-def create_masking_rule(data: schemas.MaskingRuleCreate, db: Session = Depends(get_db)):
+def create_masking_rule(
+    data: schemas.MaskingRuleCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     try:
         re.compile(data.column_pattern)
     except re.error as e:
@@ -420,7 +718,12 @@ def create_masking_rule(data: schemas.MaskingRuleCreate, db: Session = Depends(g
 
 
 @app.put("/api/masking-rules/{rule_id}", response_model=schemas.MaskingRuleResponse)
-def update_masking_rule(rule_id: int, data: schemas.MaskingRuleUpdate, db: Session = Depends(get_db)):
+def update_masking_rule(
+    rule_id: int,
+    data: schemas.MaskingRuleUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     rule = db.query(models.MaskingRule).filter(models.MaskingRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="脱敏规则不存在")
@@ -436,7 +739,11 @@ def update_masking_rule(rule_id: int, data: schemas.MaskingRuleUpdate, db: Sessi
 
 
 @app.delete("/api/masking-rules/{rule_id}")
-def delete_masking_rule(rule_id: int, db: Session = Depends(get_db)):
+def delete_masking_rule(
+    rule_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_role(["dba"]))
+):
     rule = db.query(models.MaskingRule).filter(models.MaskingRule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="脱敏规则不存在")

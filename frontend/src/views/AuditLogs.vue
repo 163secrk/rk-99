@@ -54,7 +54,12 @@
             <el-tag size="small" type="info">{{ row.datasource_name }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="SQL语句" min-width="280">
+        <el-table-column prop="executed_by" label="执行人" width="120" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" type="primary">{{ row.executed_by || 'anonymous' }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="SQL语句" min-width="260">
           <template #default="{ row }">
             <el-tooltip
               effect="dark"
