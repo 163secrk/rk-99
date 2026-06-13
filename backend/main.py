@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import time
 import math
+import re
 
 from database import engine, get_db, Base
 import models
@@ -33,7 +34,9 @@ def get_mysql_connection(host, port, username, password, database):
             database=database,
             charset="utf8mb4",
             cursorclass=pymysql.cursors.DictCursor,
-            connect_timeout=10
+            connect_timeout=3,
+            read_timeout=5,
+            write_timeout=5
         )
         return conn
     except ImportError:
@@ -42,23 +45,49 @@ def get_mysql_connection(host, port, username, password, database):
         raise HTTPException(status_code=500, detail=f"连接失败: {str(e)}")
 
 
+def is_select_query(sql):
+    trimmed = sql.strip().lstrip('(').strip()
+    first_word = re.split(r'\s+', trimmed, maxsplit=1)[0].upper()
+    return first_word in ('SELECT', 'WITH')
+
+
+def has_limit_clause(sql):
+    pattern = re.compile(r'\bLIMIT\b', re.IGNORECASE)
+    return bool(pattern.search(sql))
+
+
+def remove_trailing_semicolon(sql):
+    return sql.rstrip().rstrip(';').rstrip()
+
+
 def execute_query_with_pagination(conn, sql, page, page_size):
     import pymysql.cursors
     try:
         with conn.cursor() as cursor:
-            count_sql = f"SELECT COUNT(*) as total FROM ({sql}) AS _count_wrapper"
-            cursor.execute(count_sql)
-            total_rows = cursor.fetchone()["total"]
+            clean_sql = remove_trailing_semicolon(sql)
+            is_select = is_select_query(clean_sql)
+            has_limit = has_limit_clause(clean_sql)
 
-            offset = (page - 1) * page_size
-            paginated_sql = f"{sql} LIMIT {page_size} OFFSET {offset}"
-            cursor.execute(paginated_sql)
+            if is_select and not has_limit:
+                count_sql = f"SELECT COUNT(*) as total FROM ({clean_sql}) AS _count_wrapper"
+                cursor.execute(count_sql)
+                total_rows = cursor.fetchone()["total"]
+
+                offset = (page - 1) * page_size
+                paginated_sql = f"{clean_sql} LIMIT {page_size} OFFSET {offset}"
+                cursor.execute(paginated_sql)
+            else:
+                cursor.execute(clean_sql)
+                total_rows = cursor.rowcount
 
             columns = [desc[0] for desc in cursor.description] if cursor.description else []
             rows = cursor.fetchall()
             rows_list = [[row[col] for col in columns] for row in rows]
 
-            total_pages = math.ceil(total_rows / page_size) if total_rows > 0 else 0
+            if is_select and not has_limit:
+                total_pages = math.ceil(total_rows / page_size) if total_rows > 0 else 0
+            else:
+                total_pages = 1 if total_rows > 0 else 0
 
             return columns, rows_list, total_rows, total_pages
     except Exception as e:
