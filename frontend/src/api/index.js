@@ -31,4 +31,13 @@ export const auditApi = {
   delete: (id) => api.delete(`/audit-logs/${id}`)
 }
 
+export const riskRuleApi = {
+  list: (params) => api.get('/risk-rules', { params }),
+  get: (id) => api.get(`/risk-rules/${id}`),
+  create: (data) => api.post('/risk-rules', data),
+  update: (id, data) => api.put(`/risk-rules/${id}`, data),
+  delete: (id) => api.delete(`/risk-rules/${id}`),
+  check: (data) => api.post('/risk-check', data)
+}
+
 export default api

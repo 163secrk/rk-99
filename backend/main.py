@@ -9,6 +9,7 @@ import re
 from database import engine, get_db, Base
 import models
 import schemas
+import sql_risk
 
 Base.metadata.create_all(bind=engine)
 
@@ -170,9 +171,34 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
     if not ds:
         raise HTTPException(status_code=404, detail="数据源不存在")
 
+    risk_rules = db.query(models.RiskRule).filter(
+        models.RiskRule.is_active == True,
+        models.RiskRule.rule_type == "sensitive_table"
+    ).all()
+
+    risk_result = sql_risk.run_risk_check(data.sql, risk_rules)
+
     start_time = time.time()
     conn = None
     try:
+        if risk_result.blocked:
+            block_reason_str = "; ".join(risk_result.reasons)
+            execution_time_ms = int((time.time() - start_time) * 1000)
+            audit_log = models.AuditLog(
+                datasource_id=ds.id,
+                datasource_name=ds.name,
+                sql_statement=data.sql,
+                result_rows=0,
+                execution_time_ms=execution_time_ms,
+                status="blocked",
+                blocked=True,
+                block_reason=block_reason_str,
+                error_message=f"SQL 风险拦截: {block_reason_str}"
+            )
+            db.add(audit_log)
+            db.commit()
+            raise HTTPException(status_code=403, detail=f"SQL 风险拦截: {block_reason_str}")
+
         conn = get_mysql_connection(
             host=ds.host,
             port=ds.port,
@@ -188,18 +214,21 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
         )
         execution_time_ms = int((time.time() - start_time) * 1000)
 
+        warning_reason = "; ".join(risk_result.reasons) if risk_result.reasons else None
         audit_log = models.AuditLog(
             datasource_id=ds.id,
             datasource_name=ds.name,
             sql_statement=data.sql,
             result_rows=total_rows,
             execution_time_ms=execution_time_ms,
-            status="success"
+            status="success",
+            blocked=False,
+            block_reason=warning_reason
         )
         db.add(audit_log)
         db.commit()
 
-        return schemas.SQLExecuteResponse(
+        resp = schemas.SQLExecuteResponse(
             columns=columns,
             rows=rows_list,
             total_rows=total_rows,
@@ -208,6 +237,9 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
             total_pages=total_pages,
             execution_time_ms=execution_time_ms
         )
+        return resp
+    except HTTPException:
+        raise
     except Exception as e:
         execution_time_ms = int((time.time() - start_time) * 1000)
         audit_log = models.AuditLog(
@@ -217,6 +249,7 @@ def execute_sql(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
             result_rows=0,
             execution_time_ms=execution_time_ms,
             status="failed",
+            blocked=False,
             error_message=str(e)
         )
         db.add(audit_log)
@@ -236,6 +269,7 @@ def list_audit_logs(
     page_size: int = Query(20, ge=1, le=100),
     datasource_id: Optional[int] = None,
     status: Optional[str] = None,
+    blocked: Optional[bool] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(models.AuditLog)
@@ -243,6 +277,8 @@ def list_audit_logs(
         query = query.filter(models.AuditLog.datasource_id == datasource_id)
     if status:
         query = query.filter(models.AuditLog.status == status)
+    if blocked is not None:
+        query = query.filter(models.AuditLog.blocked == blocked)
 
     total = query.count()
     total_pages = math.ceil(total / page_size) if total > 0 else 0
@@ -266,6 +302,81 @@ def delete_audit_log(log_id: int, db: Session = Depends(get_db)):
     db.delete(log)
     db.commit()
     return {"message": "删除成功"}
+
+
+@app.get("/api/risk-rules", response_model=list[schemas.RiskRuleResponse])
+def list_risk_rules(
+    rule_type: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.RiskRule)
+    if rule_type:
+        query = query.filter(models.RiskRule.rule_type == rule_type)
+    if is_active is not None:
+        query = query.filter(models.RiskRule.is_active == is_active)
+    return query.order_by(models.RiskRule.id.desc()).all()
+
+
+@app.get("/api/risk-rules/{rule_id}", response_model=schemas.RiskRuleResponse)
+def get_risk_rule(rule_id: int, db: Session = Depends(get_db)):
+    rule = db.query(models.RiskRule).filter(models.RiskRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return rule
+
+
+@app.post("/api/risk-rules", response_model=schemas.RiskRuleResponse)
+def create_risk_rule(data: schemas.RiskRuleCreate, db: Session = Depends(get_db)):
+    if data.rule_type == "sensitive_table":
+        try:
+            import re
+            re.compile(data.pattern)
+        except re.error as e:
+            raise HTTPException(status_code=400, detail=f"正则表达式无效: {str(e)}")
+    rule = models.RiskRule(**data.model_dump())
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@app.put("/api/risk-rules/{rule_id}", response_model=schemas.RiskRuleResponse)
+def update_risk_rule(rule_id: int, data: schemas.RiskRuleUpdate, db: Session = Depends(get_db)):
+    rule = db.query(models.RiskRule).filter(models.RiskRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    if data.rule_type == "sensitive_table":
+        try:
+            import re
+            re.compile(data.pattern)
+        except re.error as e:
+            raise HTTPException(status_code=400, detail=f"正则表达式无效: {str(e)}")
+    for key, value in data.model_dump().items():
+        setattr(rule, key, value)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@app.delete("/api/risk-rules/{rule_id}")
+def delete_risk_rule(rule_id: int, db: Session = Depends(get_db)):
+    rule = db.query(models.RiskRule).filter(models.RiskRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    db.delete(rule)
+    db.commit()
+    return {"message": "删除成功"}
+
+
+@app.post("/api/risk-check", response_model=schemas.RiskCheckResultResponse)
+def check_sql_risk(data: schemas.SQLExecuteRequest, db: Session = Depends(get_db)):
+    risk_rules = db.query(models.RiskRule).filter(
+        models.RiskRule.is_active == True,
+        models.RiskRule.rule_type == "sensitive_table"
+    ).all()
+    result = sql_risk.run_risk_check(data.sql, risk_rules)
+    return result
 
 
 if __name__ == "__main__":

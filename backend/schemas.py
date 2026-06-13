@@ -68,6 +68,8 @@ class AuditLogResponse(BaseModel):
     executed_by: str
     status: str
     error_message: Optional[str] = None
+    blocked: bool = False
+    block_reason: Optional[str] = None
     executed_at: Optional[datetime] = None
 
     class Config:
@@ -80,3 +82,35 @@ class PaginatedAuditLogs(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class RiskRuleBase(BaseModel):
+    rule_type: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=255)
+    pattern: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    severity: str = Field(default="high", pattern="^(low|medium|high)$")
+    is_active: bool = True
+
+
+class RiskRuleCreate(RiskRuleBase):
+    pass
+
+
+class RiskRuleUpdate(RiskRuleBase):
+    pass
+
+
+class RiskRuleResponse(RiskRuleBase):
+    id: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RiskCheckResultResponse(BaseModel):
+    blocked: bool
+    reasons: List[str]
+    severity: str

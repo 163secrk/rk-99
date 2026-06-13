@@ -23,6 +23,9 @@
           <el-button type="primary" :loading="executing" @click="runQuery">
             <el-icon><VideoPlay /></el-icon> 执行查询 (Ctrl+Enter)
           </el-button>
+          <el-button :loading="checkingRisk" @click="checkRisk">
+            <el-icon><Warning /></el-icon> 风险检测
+          </el-button>
           <el-button @click="clearEditor">
             <el-icon><RefreshRight /></el-icon> 清空
           </el-button>
@@ -107,13 +110,15 @@
 <script setup>
 import { ref, reactive, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { datasourceApi, queryApi } from '@/api'
+import { Warning, Edit, VideoPlay, RefreshRight, InfoFilled, DataLine } from '@element-plus/icons-vue'
+import { datasourceApi, queryApi, riskRuleApi } from '@/api'
 
 const editorRef = ref(null)
 const datasources = ref([])
 const selectedDsId = ref(null)
 const sqlText = ref('')
 const executing = ref(false)
+const checkingRisk = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const columns = ref([])
@@ -141,6 +146,57 @@ const onDsChange = () => {
   currentPage.value = 1
   resultInfo.total_rows = null
   resultInfo.total_pages = 0
+}
+
+const checkRisk = async () => {
+  if (!selectedDsId.value) {
+    ElMessage.warning('请先选择数据源')
+    return
+  }
+  const sql = sqlText.value.trim()
+  if (!sql) {
+    ElMessage.warning('请输入SQL语句')
+    return
+  }
+
+  checkingRisk.value = true
+  try {
+    const result = await riskRuleApi.check({
+      datasource_id: selectedDsId.value,
+      sql: sql,
+      page: 1,
+      page_size: 20
+    })
+    if (result.blocked) {
+      const reasons = result.reasons.map((r, i) => `${i + 1}. ${r}`).join('\n')
+      ElMessageBox.alert(
+        `检测到以下风险，执行将被拦截：\n\n${reasons}`,
+        'SQL 风险警告',
+        {
+          confirmButtonText: '我知道了',
+          type: 'error',
+          dangerouslyUseHTMLString: false
+        }
+      )
+    } else if (result.reasons && result.reasons.length > 0) {
+      const reasons = result.reasons.map((r, i) => `${i + 1}. ${r}`).join('\n')
+      ElMessageBox.alert(
+        `检测到以下风险提示：\n\n${reasons}\n\n可以执行，但请注意操作风险。`,
+        'SQL 风险提示',
+        {
+          confirmButtonText: '我知道了',
+          type: 'warning'
+        }
+      )
+    } else {
+      ElMessage.success('未检测到SQL风险')
+    }
+  } catch (e) {
+    const msg = e?.response?.data?.detail || e?.message || '检测失败'
+    ElMessage.error(msg)
+  } finally {
+    checkingRisk.value = false
+  }
 }
 
 const runQuery = async () => {
@@ -171,10 +227,15 @@ const runQuery = async () => {
     ElMessage.success(`执行成功，共 ${result.total_rows} 行`)
   } catch (e) {
     const msg = e?.response?.data?.detail || e?.message || '执行失败'
-    ElMessageBox.alert(msg, 'SQL执行错误', {
-      confirmButtonText: '确定',
-      type: 'error'
-    })
+    const isBlocked = msg && msg.includes('SQL 风险拦截')
+    ElMessageBox.alert(
+      msg,
+      isBlocked ? 'SQL 执行被拦截' : 'SQL 执行错误',
+      {
+        confirmButtonText: '确定',
+        type: isBlocked ? 'error' : 'error'
+      }
+    )
     columns.value = []
     rows.value = []
     resultInfo.total_rows = null

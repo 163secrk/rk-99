@@ -29,6 +29,17 @@
           <el-option label="成功" value="success" />
           <el-option label="失败" value="failed" />
         </el-select>
+        <el-select
+          v-model="filterBlocked"
+          placeholder="按拦截状态筛选"
+          clearable
+          size="default"
+          style="width: 160px; margin-left: 10px;"
+          @change="onFilterChange"
+        >
+          <el-option label="已拦截" :value="true" />
+          <el-option label="未拦截" :value="false" />
+        </el-select>
         <el-button type="primary" style="margin-left: 10px;" @click="fetchLogs">
           <el-icon><Search /></el-icon> 刷新
         </el-button>
@@ -73,6 +84,27 @@
             >
               {{ row.status === 'success' ? '成功' : '失败' }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="是否拦截" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag
+              v-if="row.blocked"
+              type="danger"
+              size="small"
+              effect="dark"
+            >
+              <el-icon><Warning /></el-icon> 已拦截
+            </el-tag>
+            <el-tag v-else type="success" size="small">
+              正常
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="block_reason" label="拦截原因" min-width="200" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.block_reason" class="block-reason-text">{{ row.block_reason }}</span>
+            <span v-else style="color: #c0c4cc;">-</span>
           </template>
         </el-table-column>
         <el-table-column prop="error_message" label="错误信息" min-width="180" show-overflow-tooltip>
@@ -131,6 +163,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Warning, Search, Document, CopyDocument } from '@element-plus/icons-vue'
 import { auditApi, datasourceApi } from '@/api'
 
 const loading = ref(false)
@@ -141,6 +174,7 @@ const pageSize = ref(20)
 const total = ref(0)
 const filterDsId = ref(null)
 const filterStatus = ref(null)
+const filterBlocked = ref(null)
 const sqlDialogVisible = ref(false)
 const selectedSql = ref('')
 
@@ -153,6 +187,7 @@ const fetchLogs = async () => {
     }
     if (filterDsId.value) params.datasource_id = filterDsId.value
     if (filterStatus.value) params.status = filterStatus.value
+    if (filterBlocked.value !== null) params.blocked = filterBlocked.value
     const res = await auditApi.list(params)
     logs.value = res.items
     total.value = res.total
@@ -266,6 +301,14 @@ onMounted(() => {
 .err-text {
   color: #f56c6c;
   font-size: 12px;
+}
+
+.block-reason-text {
+  color: #f56c6c;
+  font-size: 12px;
+  background: #fef0f0;
+  padding: 2px 6px;
+  border-radius: 3px;
 }
 
 .pagination-wrap {
